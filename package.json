@@ -1,0 +1,12 @@
+{
+  "name": "ds-garage-mercadolivre",
+  "version": "1.0.0",
+  "description": "Servidor OAuth da DS Garage para integração com Mercado Livre",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
