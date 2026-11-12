@@ -1153,7 +1153,4 @@ const BLOCKED_TERMS = [
 
   // EPI / SEGURANÇA NÃO AUTOMOTIVA
   "colete",
-  "colete refletivo",
-  "colete reflexivo",
-  "colete de seguranca",
-  "blusao refle --- TRUNCATED --- 103,302 chars
+  "colete refletivo --- TRUNCATED --- 104,306 chars
