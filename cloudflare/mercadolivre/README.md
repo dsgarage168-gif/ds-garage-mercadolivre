@@ -32,3 +32,12 @@ Secrets/vars:
 - `WAPI_ALERT_PHONE` (variável usada no lugar do número de alerta removido desta cópia)
 
 **Importante:** esta cópia é um snapshot seguro para versionamento, não um pacote pronto para deploy. Antes de publicar qualquer alteração a partir dela, confira os bindings, secrets, compatibilidade e configurações diretamente no Cloudflare. Não coloque tokens ou identificadores privados no GitHub.
+
+
+## Resiliência e observabilidade (12/11/2026)
+
+- Geração de link afiliado: backoff de 30s, 60s e 120s para respostas temporárias; respeita `Retry-After` até 120s.
+- W-API: até 3 tentativas somente para HTTP 429; respeita `Retry-After` e registra status/corpo de erro limitado, sem registrar credenciais.
+- Erros da execução registram etapa e mensagem legível.
+- Cloudflare Observability: logs persistentes, invocations habilitadas, amostragem de 100% e query strings redigidas.
+- O cron de produção permanece `*/20 * * * *`; nenhum agendamento foi alterado.
