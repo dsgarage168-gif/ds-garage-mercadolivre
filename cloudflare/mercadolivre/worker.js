@@ -1155,4 +1155,5 @@ const BLOCKED_TERMS = [
   "colete",
   "colete refletivo",
   "colete reflexivo",
-  "colete de segura --- TRUNCATED --- 103,300 chars
+  "colete de seguranca",
+  "blusao refle --- TRUNCATED --- 103,302 chars
