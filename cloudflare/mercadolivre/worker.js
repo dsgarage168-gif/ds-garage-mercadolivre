@@ -16,8 +16,8 @@ const CATEGORY_COUNT = 10;
 const PRODUCTS_PER_CATEGORY = 12;
 const ITEMS_PER_PRODUCT = 5;
 
-const COOLDOWN_MS = 4 * 60 * 60 * 1000;
-const HISTORICO_PRODUTO_MS = 7 * 24 * 60 * 60 * 1000;
+const COOLDOWN_MS = 12 * 60 * 60 * 1000;
+const HISTORICO_PRODUTO_MS = 12 * 60 * 60 * 1000;
 const MIN_DISCOUNT = 3;
 const MAX_PRICE_WITHOUT_DISCOUNT = 500;
 
@@ -63,6 +63,36 @@ function obterTipoProduto(nome) {
   }
 
   return null;
+}
+
+// ============================================================
+// ASSINATURA DE PRODUTO PARA EVITAR ANÚNCIOS EQUIVALENTES
+// Mantém marca, modelo, números e características relevantes.
+// Remove apenas palavras promocionais, conectivos e descritores genéricos.
+// ============================================================
+function chaveProdutoSimilar(nome) {
+  const ignorar = new Set([
+    "a", "as", "o", "os", "de", "da", "das", "do", "dos",
+    "e", "em", "com", "para", "por", "no", "na", "nos", "nas",
+    "um", "uma", "uns", "umas",
+    "novo", "nova", "novos", "novas", "original", "originais",
+    "oferta", "promocao", "imperdivel", "frete", "gratis",
+    "lacrado", "lacrada", "produto", "inteligente", "inteligentes",
+    "automotivo", "automotiva", "automotivos", "automotivas"
+  ]);
+  const textoNormalizado = normalizar(nome)
+    .replace(/\b(\d+)\s+(v|w|a|ah|mah|mm|cm|m|pol|polegadas|kg|g|l|ml)\b/g, "$1$2")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+  const tokens = textoNormalizado
+    .split(/\s+/)
+    .filter(token => token.length > 1 && !ignorar.has(token));
+  const unicos = [...new Set(tokens)].sort();
+  const assinatura = unicos.join("-");
+  if (unicos.length < 3 || assinatura.length < 12 || assinatura.length > 200) {
+    return null;
+  }
+  return `similar:v1:${assinatura}`;
 }
 
 // ============================================================
@@ -1979,7 +2009,7 @@ function relevante(nome, categoria) {
   return nomeAutomotivo;
 }
 
-function enviadoNosUltimos7Dias(
+function enviadoNasUltimas12Horas(
   controle,
   itemId
 ) {
@@ -2020,8 +2050,8 @@ function enviadoNosUltimos7Dias(
 
 function recente(controle, itemId, nome, familia) {
   const agora = Date.now();
-
   const tipoAtual = obterTipoProduto(nome);
+  const assinaturaAtual = chaveProdutoSimilar(nome);
 
   return controle.recentes.some((registro) => {
     const tempoDecorrido =
@@ -2043,6 +2073,17 @@ function recente(controle, itemId, nome, familia) {
       if (
         normalizar(registro.nome) ===
         normalizar(nome)
+      ) {
+        return true;
+      }
+
+      const assinaturaRegistro =
+        registro.assinaturaProduto ||
+        chaveProdutoSimilar(registro.nome);
+
+      if (
+        assinaturaAtual &&
+        assinaturaRegistro === assinaturaAtual
       ) {
         return true;
       }
@@ -2302,10 +2343,10 @@ async function encontrarOferta(env, controle) {
         diagnostico.produtosAnalisados++;
 
         // ======================================================
-        // HISTÓRICO DO PRODUTO — 7 DIAS
+        // HISTÓRICO DO PRODUTO — 12 HORAS
         // ======================================================
 
-const produtoEnviadoNosUltimos7Dias =
+const produtoEnviadoNasUltimas12Horas =
   controle.recentes.some(
     (registro) => {
       const timestamp =
@@ -2337,7 +2378,7 @@ const produtoEnviadoNosUltimos7Dias =
   );
 
 if (
-  produtoEnviadoNosUltimos7Dias
+  produtoEnviadoNasUltimas12Horas
 ) {
   diagnostico.rejeicoes
     .repetido++;
@@ -2552,12 +2593,12 @@ if (
             }
 
             // ==================================================
-            // HISTÓRICO DO ITEM — 7 DIAS
+            // HISTÓRICO DO ITEM — 12 HORAS
             // ==================================================
 
 const enviadoSemana =
-  produtoEnviadoNosUltimos7Dias ||
-  enviadoNosUltimos7Dias(
+  produtoEnviadoNasUltimas12Horas ||
+  enviadoNasUltimas12Horas(
     controle,
     itemId
   );
@@ -2588,7 +2629,7 @@ const enviadoSemana =
             }
 
             // ==================================================
-            // ITEM JÁ ENVIADO NOS ÚLTIMOS 7 DIAS
+            // ITEM JÁ ENVIADO NAS ÚLTIMAS 12 HORAS
             // ==================================================
             // Continua sendo apenas candidato de reserva.
             // Isso preserva exatamente a tolerância que já
@@ -2785,8 +2826,23 @@ async function gerarLinkAfiliado(
 
     if (response.ok) break;
 
+    // HTTP 429 é um rate limit do serviço de afiliados/Render.
+    // Não repetir a mesma solicitação nesta execução: aguardar o próximo cron.
+    if (response.status === 429) {
+      const retryAfterHeader = response.headers.get("Retry-After");
+      console.error(
+        "Render afiliado HTTP 429; encerrando esta execução sem novas tentativas para respeitar o rate limit." +
+        (retryAfterHeader
+          ? " O serviço informou Retry-After."
+          : " Sem Retry-After informado; a próxima tentativa ficará para o próximo cron.")
+      );
+      throw new Error(
+        "Render afiliado HTTP 429: Too Many Requests; nova tentativa no próximo cron."
+      );
+    }
+
     const erroTemporario =
-      [429, 502, 503, 504].includes(response.status);
+      [502, 503, 504].includes(response.status);
 
     if (!erroTemporario || tentativa === MAX_TENTATIVAS_AFILIADO) {
       throw new Error(
@@ -2879,6 +2935,26 @@ async function imagemParaDataUri(
     binario
   )}`;
 
+}
+
+// ============================================================
+// W-API - REGISTRO DE ACEITE PARA CORRELACIONAR STATUS
+// ============================================================
+
+async function registrarEnvioWapi(env, responseText, source) {
+  let data;
+  try { data = JSON.parse(responseText); } catch { return; }
+  const messageId = String(
+    data?.messageId || data?.MessageId ||
+    data?.data?.messageId || data?.data?.MessageId ||
+    data?.result?.messageId || data?.result?.MessageId || ""
+  ).trim();
+  if (!messageId || messageId.length > 200) return;
+  await env.ENVIADOS.put(
+    `wapi:source:${messageId}`,
+    JSON.stringify({ source, accepted: true, acceptedAt: Date.now() }),
+    { expirationTtl: 5184000 }
+  );
 }
 
 // ============================================================
@@ -3003,10 +3079,10 @@ async function enviarWhatsApp(
       tentativa === MAX_TENTATIVAS_WAPI
     ) {
       console.error(
-        `W-API FALHA | HTTP ${response.status} | ${texto.slice(0, 500)}`
+        `W-API FALHA | HTTP ${response.status}`
       );
       throw new Error(
-        `W-API HTTP ${response.status}: ${texto.slice(0, 500)}`
+        `W-API HTTP ${response.status}`
       );
     }
 
@@ -3023,6 +3099,10 @@ async function enviarWhatsApp(
     );
 
     await new Promise(resolve => setTimeout(resolve, espera));
+  }
+
+  if (response.ok) {
+    await registrarEnvioWapi(env, texto, "mercadolivre");
   }
 
   console.log("W-API HTTP STATUS", response.status);
@@ -3087,20 +3167,19 @@ async function enviarAlertaErro(env, etapa, erro) {
       }
     );
 
-    const texto = await response.text();
+    await response.text();
 
     if (!response.ok) {
       console.error(
-        "Falha ao enviar alerta de erro:",
-        response.status,
-        texto
+        "Falha ao enviar alerta de erro; HTTP",
+        response.status
       );
       return;
     }
 
     console.log(
-      "Alerta de erro enviado para o WhatsApp pessoal:",
-      texto
+      "W-API aceitou a solicitação do alerta de erro; HTTP",
+      response.status
     );
   } catch (erroAlerta) {
     console.error(
@@ -3192,21 +3271,19 @@ async function enviarAlertaSemOferta(env, diagnostico) {
       }
     );
 
-    const texto =
-      await response.text();
+    await response.text();
 
     if (!response.ok) {
       console.error(
-        "Falha ao enviar alerta de nenhuma oferta:",
-        response.status,
-        texto
+        "Falha ao enviar alerta de nenhuma oferta; HTTP",
+        response.status
       );
       return;
     }
 
     console.log(
-      "Alerta de nenhuma oferta enviado:",
-      texto
+      "W-API aceitou a solicitação do alerta de nenhuma oferta; HTTP",
+      response.status
     );
 
   } catch (erro) {
@@ -3266,6 +3343,10 @@ function registrar(
       nome:
 
         candidato.nome,
+
+      assinaturaProduto:
+
+        chaveProdutoSimilar(candidato.nome),
 
       familia:
 
@@ -3911,6 +3992,229 @@ function horarioPermitido() {
 }
 
 // ============================================================
+// W-API - WEBHOOKS DE ENTREGA E STATUS
+// Segredo aleatório mantido no KV existente; nunca vai para logs.
+// ============================================================
+
+const WAPI_WEBHOOK_SECRET_KEY = "wapi:webhook:secret";
+const WAPI_WEBHOOK_CONFIG_KEY = "wapi:webhook:config";
+const WAPI_WEBHOOK_URL = "https://ds-garage-oauth.dsgarage168.workers.dev/wapi/events";
+const WAPI_WEBHOOK_TTL_SECONDS = 60 * 60 * 24 * 60;
+
+function gerarSegredoWebhookWapi() {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function configurarWebhooksWapi(env) {
+  if (!env.WAPI_TOKEN || !env.WAPI_INSTANCE_ID || !env.ENVIADOS) {
+    return { configured: false, reason: "missing_configuration" };
+  }
+
+  const saved = await env.ENVIADOS.get(WAPI_WEBHOOK_CONFIG_KEY, "json");
+  if (saved?.delivery === true && saved?.status === true) {
+    return { configured: true, changed: false };
+  }
+
+  const headers = {
+    Authorization: `Bearer ${env.WAPI_TOKEN}`,
+    "Content-Type": "application/json"
+  };
+  const instanceQuery = `?instanceId=${encodeURIComponent(env.WAPI_INSTANCE_ID)}`;
+  const fetchUrl = `https://api.w-api.app/v1/instance/fetch-instance${instanceQuery}`;
+
+  const currentResponse = await fetch(fetchUrl, { headers });
+  const currentText = await currentResponse.text();
+  let current;
+  try { current = JSON.parse(currentText); } catch { current = null; }
+
+  if (!currentResponse.ok || !current || current.error === true) {
+    return { configured: false, reason: `instance_lookup_http_${currentResponse.status}` };
+  }
+
+  let secret = await env.ENVIADOS.get(WAPI_WEBHOOK_SECRET_KEY);
+  const currentDelivery = String(current.webhookDeliveryUrl || "");
+  const currentStatus = String(current.webhookStatusUrl || "");
+
+  if (!secret && (currentDelivery || currentStatus)) {
+    return { configured: false, conflict: true };
+  }
+
+  if (!secret) {
+    secret = gerarSegredoWebhookWapi();
+    await env.ENVIADOS.put(WAPI_WEBHOOK_SECRET_KEY, secret);
+    // Aguarda a propagação global do KV antes de registrar a URL na W-API.
+    await new Promise(resolve => setTimeout(resolve, 60000));
+  }
+
+  const callbackUrl = `${WAPI_WEBHOOK_URL}?key=${encodeURIComponent(secret)}`;
+
+  if ((currentDelivery && currentDelivery !== callbackUrl) ||
+      (currentStatus && currentStatus !== callbackUrl)) {
+    return { configured: false, conflict: true };
+  }
+
+  const updates = [
+    {
+      name: "delivery",
+      current: currentDelivery,
+      endpoint: "https://api.w-api.app/v1/webhook/update-webhook-delivery"
+    },
+    {
+      name: "status",
+      current: currentStatus,
+      endpoint: "https://api.w-api.app/v1/webhook/update-webhook-message-status"
+    }
+  ];
+
+  for (const item of updates) {
+    if (item.current === callbackUrl) continue;
+    const response = await fetch(`${item.endpoint}${instanceQuery}`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ value: callbackUrl })
+    });
+    const text = await response.text();
+    let result;
+    try { result = JSON.parse(text); } catch { result = null; }
+    if (!response.ok || !result || result.error === true) {
+      return { configured: false, reason: `${item.name}_update_http_${response.status}` };
+    }
+  }
+
+  const verifyResponse = await fetch(fetchUrl, { headers });
+  const verifyText = await verifyResponse.text();
+  let verified;
+  try { verified = JSON.parse(verifyText); } catch { verified = null; }
+
+  const deliveryOk = verifyResponse.ok && verified?.webhookDeliveryUrl === callbackUrl;
+  const statusOk = verifyResponse.ok && verified?.webhookStatusUrl === callbackUrl;
+
+  if (!deliveryOk || !statusOk) {
+    return { configured: false, delivery: deliveryOk, status: statusOk, reason: "verification_failed" };
+  }
+
+  await env.ENVIADOS.put(
+    WAPI_WEBHOOK_CONFIG_KEY,
+    JSON.stringify({ delivery: true, status: true, configuredAt: Date.now() })
+  );
+
+  return { configured: true, changed: true };
+}
+
+async function processarWebhookWapi(request, env, url) {
+  if (request.method !== "POST") {
+    return json({ success: false }, 405);
+  }
+
+  const expectedSecret = await env.ENVIADOS.get(WAPI_WEBHOOK_SECRET_KEY);
+  const suppliedSecret = url.searchParams.get("key");
+  if (!expectedSecret || suppliedSecret !== expectedSecret) {
+    return json({ success: false }, 401);
+  }
+
+  let payload;
+  try { payload = await request.json(); } catch {
+    return json({ success: false }, 400);
+  }
+
+  const event = String(payload?.event || "").trim();
+  const isDeliveryEvent = event.toLowerCase().includes("delivery");
+  const isStatusEvent = event.toLowerCase().includes("status");
+  if (!isDeliveryEvent && !isStatusEvent) {
+    return json({ success: true, ignored: true });
+  }
+
+  const messageId = String(
+    payload?.messageId || payload?.MessageId ||
+    payload?.data?.messageId || payload?.data?.MessageId ||
+    payload?.message?.messageId || payload?.data?.message?.messageId || ""
+  ).trim();
+
+  if (!/^[A-Za-z0-9._:-]{1,200}$/.test(messageId)) {
+    return json({ success: true, ignored: true });
+  }
+
+  const rawStatus = String(
+    payload?.status || payload?.messageStatus || payload?.message_status ||
+    payload?.state || payload?.ack || payload?.data?.status ||
+    payload?.data?.messageStatus || payload?.data?.state || payload?.data?.ack || ""
+  ).trim().toUpperCase();
+
+  const allowedStatuses = new Set([
+    "SENT", "DELIVERED", "RECEIVED", "READ", "FAILED", "ERROR",
+    "PENDING", "SERVER_ACK", "DEVICE_ACK"
+  ]);
+  const status = allowedStatuses.has(rawStatus) ? rawStatus : null;
+  const momentValue = Number(payload?.moment || payload?.timestamp || 0);
+  const moment = Number.isFinite(momentValue) && momentValue > 0 ? momentValue : null;
+  const receivedAt = Date.now();
+  const recordKey = `wapi:message:${messageId}`;
+
+  const previous = await env.ENVIADOS.get(recordKey, "json") || {};
+  const history = Array.isArray(previous.history) ? previous.history : [];
+  const duplicateByMoment = moment !== null && history.some(
+    item => item.event === event && item.status === status && item.moment === moment
+  );
+  const duplicateByLastState = moment === null &&
+    previous.lastEvent === event &&
+    (!status || status === previous.lastStatus);
+  const duplicate = duplicateByMoment || duplicateByLastState;
+
+  // Só consulta o vínculo de origem quando o registro ainda não o conhece.
+  // Isso evita uma segunda leitura KV em callbacks de mensagens já mapeadas.
+  const sourceKnown = previous.accepted === true &&
+    typeof previous.source === "string" &&
+    previous.source !== "unmapped";
+  const sourceInfo = sourceKnown
+    ? null
+    : await env.ENVIADOS.get(`wapi:source:${messageId}`, "json");
+
+  // Callbacks repetidos não precisam regravar o mesmo registro.
+  // Se a origem ainda não estava mapeada, permite atualizar o vínculo mesmo
+  // quando o evento é repetido.
+  if (duplicate && !sourceInfo) {
+    return json({ success: true, recorded: false, duplicate: true });
+  }
+
+  if (!duplicate) {
+    history.push({ event, status, moment, receivedAt });
+  }
+
+  const delivered = previous.delivered === true ||
+    status === "DELIVERED" || status === "RECEIVED" || status === "READ";
+  const read = previous.read === true || status === "READ";
+  const sent = previous.sent === true || isDeliveryEvent ||
+    ["SENT", "DELIVERED", "RECEIVED", "READ"].includes(status);
+  const failed = previous.failed === true || status === "FAILED" || status === "ERROR";
+
+  await env.ENVIADOS.put(
+    recordKey,
+    JSON.stringify({
+      source: sourceInfo?.source || previous.source || "unmapped",
+      accepted: !!sourceInfo || previous.accepted === true,
+      sent,
+      delivered,
+      read,
+      failed,
+      lastEvent: event,
+      lastStatus: status || previous.lastStatus || null,
+      lastMoment: moment || previous.lastMoment || null,
+      updatedAt: receivedAt,
+      history: history.slice(-20)
+    }),
+    { expirationTtl: WAPI_WEBHOOK_TTL_SECONDS }
+  );
+
+  console.log(
+    `WAPI webhook recorded: event=${event}; status=${status || "unspecified"}; delivered=${delivered}`
+  );
+
+  return json({ success: true, recorded: true });
+}
+
+// ============================================================
 // WORKER
 // ============================================================
 
@@ -3923,11 +4227,12 @@ export default {
 
     try {
 
-      const {
-        pathname,
-      } = new URL(
-        request.url
-      );
+      const url = new URL(request.url);
+      const { pathname } = url;
+
+      if (pathname === "/wapi/events") {
+        return processarWebhookWapi(request, env, url);
+      }
 
       if (pathname === "/") {
 
@@ -3955,6 +4260,8 @@ export default {
         "/status"
       ) {
 
+        const webhookConfig = await env.ENVIADOS.get(WAPI_WEBHOOK_CONFIG_KEY, "json").catch(() => null);
+
         return json({
 
           sucesso: true,
@@ -3972,6 +4279,11 @@ export default {
               env.WAPI_GROUP_ID &&
               env.WAPI_INSTANCE_ID
             ),
+
+          wapiWebhooks: {
+            configured: webhookConfig.configured === true,
+            conflict: webhookConfig.conflict === true
+          },
 
           estrategia:
             "Somente PRODUCT; consulta /products/{id}/items",
@@ -6314,6 +6626,18 @@ Authorization:
         event.scheduledTime
       ).toISOString()
 
+    );
+
+    ctx.waitUntil(
+      configurarWebhooksWapi(env).then(result => {
+        if (result.changed) {
+          console.log("W-API delivery/status webhooks configured and verified.");
+        } else if (result.conflict) {
+          console.error("W-API webhook setup skipped: existing callback preserved.");
+        }
+      }).catch(() => {
+        console.error("W-API webhook setup failed; existing callback settings preserved.");
+      })
     );
 
     ctx.waitUntil(
