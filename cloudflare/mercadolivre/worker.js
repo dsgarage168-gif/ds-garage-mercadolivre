@@ -4169,7 +4169,7 @@ async function processarWebhookWapi(request, env, url) {
     previous.source !== "unmapped";
   const sourceInfo = sourceKnown
     ? null
-    : await env.ENVIADOS.get(`wapi:source:${messageId}`, "json");
+    : await env.ENVIADOS.get("wapi:source:" + messageId, "json");
 
   // Callbacks repetidos não precisam regravar o mesmo registro.
   // Se a origem ainda não estava mapeada, permite atualizar o vínculo mesmo
