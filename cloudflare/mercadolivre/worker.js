@@ -2938,26 +2938,6 @@ async function imagemParaDataUri(
 }
 
 // ============================================================
-// W-API - REGISTRO DE ACEITE PARA CORRELACIONAR STATUS
-// ============================================================
-
-async function registrarEnvioWapi(env, responseText, source) {
-  let data;
-  try { data = JSON.parse(responseText); } catch { return; }
-  const messageId = String(
-    data?.messageId || data?.MessageId ||
-    data?.data?.messageId || data?.data?.MessageId ||
-    data?.result?.messageId || data?.result?.MessageId || ""
-  ).trim();
-  if (!messageId || messageId.length > 200) return;
-  await env.ENVIADOS.put(
-    `wapi:source:${messageId}`,
-    JSON.stringify({ source, accepted: true, acceptedAt: Date.now() }),
-    { expirationTtl: 5184000 }
-  );
-}
-
-// ============================================================
 // WHATSAPP
 // ============================================================
 
@@ -3100,12 +3080,7 @@ async function enviarWhatsApp(
 
     await new Promise(resolve => setTimeout(resolve, espera));
   }
-
-  if (response.ok) {
-    await registrarEnvioWapi(env, texto, "mercadolivre");
-  }
-
-  console.log("W-API HTTP STATUS", response.status);
+console.log("W-API HTTP STATUS", response.status);
 
   return {
     legenda,
@@ -4103,115 +4078,9 @@ async function configurarWebhooksWapi(env) {
   return { configured: true, changed: true };
 }
 
-async function processarWebhookWapi(request, env, url) {
-  if (request.method !== "POST") {
-    return json({ success: false }, 405);
-  }
-
-  const expectedSecret = await env.ENVIADOS.get(WAPI_WEBHOOK_SECRET_KEY);
-  const suppliedSecret = url.searchParams.get("key");
-  if (!expectedSecret || suppliedSecret !== expectedSecret) {
-    return json({ success: false }, 401);
-  }
-
-  let payload;
-  try { payload = await request.json(); } catch {
-    return json({ success: false }, 400);
-  }
-
-  const event = String(payload?.event || "").trim();
-  const isDeliveryEvent = event.toLowerCase().includes("delivery");
-  const isStatusEvent = event.toLowerCase().includes("status");
-  if (!isDeliveryEvent && !isStatusEvent) {
-    return json({ success: true, ignored: true });
-  }
-
-  const messageId = String(
-    payload?.messageId || payload?.MessageId ||
-    payload?.data?.messageId || payload?.data?.MessageId ||
-    payload?.message?.messageId || payload?.data?.message?.messageId || ""
-  ).trim();
-
-  if (!/^[A-Za-z0-9._:-]{1,200}$/.test(messageId)) {
-    return json({ success: true, ignored: true });
-  }
-
-  const rawStatus = String(
-    payload?.status || payload?.messageStatus || payload?.message_status ||
-    payload?.state || payload?.ack || payload?.data?.status ||
-    payload?.data?.messageStatus || payload?.data?.state || payload?.data?.ack || ""
-  ).trim().toUpperCase();
-
-  const allowedStatuses = new Set([
-    "SENT", "DELIVERED", "RECEIVED", "READ", "FAILED", "ERROR",
-    "PENDING", "SERVER_ACK", "DEVICE_ACK"
-  ]);
-  const status = allowedStatuses.has(rawStatus) ? rawStatus : null;
-  const momentValue = Number(payload?.moment || payload?.timestamp || 0);
-  const moment = Number.isFinite(momentValue) && momentValue > 0 ? momentValue : null;
-  const receivedAt = Date.now();
-  const recordKey = `wapi:message:${messageId}`;
-
-  const previous = await env.ENVIADOS.get(recordKey, "json") || {};
-  const history = Array.isArray(previous.history) ? previous.history : [];
-  const duplicateByMoment = moment !== null && history.some(
-    item => item.event === event && item.status === status && item.moment === moment
-  );
-  const duplicateByLastState = moment === null &&
-    previous.lastEvent === event &&
-    (!status || status === previous.lastStatus);
-  const duplicate = duplicateByMoment || duplicateByLastState;
-
-  // Só consulta o vínculo de origem quando o registro ainda não o conhece.
-  // Isso evita uma segunda leitura KV em callbacks de mensagens já mapeadas.
-  const sourceKnown = previous.accepted === true &&
-    typeof previous.source === "string" &&
-    previous.source !== "unmapped";
-  const sourceInfo = sourceKnown
-    ? null
-    : await env.ENVIADOS.get("wapi:source:" + messageId, "json");
-
-  // Callbacks repetidos não precisam regravar o mesmo registro.
-  // Se a origem ainda não estava mapeada, permite atualizar o vínculo mesmo
-  // quando o evento é repetido.
-  if (duplicate && !sourceInfo) {
-    return json({ success: true, recorded: false, duplicate: true });
-  }
-
-  if (!duplicate) {
-    history.push({ event, status, moment, receivedAt });
-  }
-
-  const delivered = previous.delivered === true ||
-    status === "DELIVERED" || status === "RECEIVED" || status === "READ";
-  const read = previous.read === true || status === "READ";
-  const sent = previous.sent === true || isDeliveryEvent ||
-    ["SENT", "DELIVERED", "RECEIVED", "READ"].includes(status);
-  const failed = previous.failed === true || status === "FAILED" || status === "ERROR";
-
-  await env.ENVIADOS.put(
-    recordKey,
-    JSON.stringify({
-      source: sourceInfo?.source || previous.source || "unmapped",
-      accepted: !!sourceInfo || previous.accepted === true,
-      sent,
-      delivered,
-      read,
-      failed,
-      lastEvent: event,
-      lastStatus: status || previous.lastStatus || null,
-      lastMoment: moment || previous.lastMoment || null,
-      updatedAt: receivedAt,
-      history: history.slice(-20)
-    }),
-    { expirationTtl: WAPI_WEBHOOK_TTL_SECONDS }
-  );
-
-  console.log(
-    `WAPI webhook recorded: event=${event}; status=${status || "unspecified"}; delivered=${delivered}`
-  );
-
-  return json({ success: true, recorded: true });
+async function processarWebhookWapi() {
+  // Eventos informativos; não participam do fluxo de ofertas.
+  return json({ success: true, ignored: true });
 }
 
 // ============================================================
@@ -6627,19 +6496,6 @@ Authorization:
       ).toISOString()
 
     );
-
-    ctx.waitUntil(
-      configurarWebhooksWapi(env).then(result => {
-        if (result.changed) {
-          console.log("W-API delivery/status webhooks configured and verified.");
-        } else if (result.conflict) {
-          console.error("W-API webhook setup skipped: existing callback preserved.");
-        }
-      }).catch(() => {
-        console.error("W-API webhook setup failed; existing callback settings preserved.");
-      })
-    );
-
     ctx.waitUntil(
 
       executar(env).catch(
