@@ -3080,7 +3080,17 @@ async function enviarWhatsApp(
 
     await new Promise(resolve => setTimeout(resolve, espera));
   }
-console.log("W-API HTTP STATUS", response.status);
+let acceptedPayload = null;
+  try { acceptedPayload = JSON.parse(texto); } catch {}
+  const acceptedData = acceptedPayload?.data && typeof acceptedPayload.data === "object"
+    ? acceptedPayload.data
+    : acceptedPayload;
+  const acceptedId = acceptedData?.messageId || acceptedData?.id || acceptedData?.key?.id || null;
+
+  console.log("[WAPI_ACCEPTED]", JSON.stringify({
+    httpStatus: response.status,
+    messageId: acceptedId ? String(acceptedId).slice(0, 120) : null
+  }));
 
   return {
     legenda,
@@ -4078,9 +4088,64 @@ async function configurarWebhooksWapi(env) {
   return { configured: true, changed: true };
 }
 
-async function processarWebhookWapi() {
-  // Eventos informativos; não participam do fluxo de ofertas.
-  return json({ success: true, ignored: true });
+async function processarWebhookWapi(request, env, url) {
+  if (request.method !== "POST") {
+    return json({ success: false, error: "method_not_allowed" }, 405);
+  }
+
+  const expected = env.WAPI_WEBHOOK_SECRET;
+  const received = url.searchParams.get("key") || "";
+  if (!expected || !received || expected.length !== received.length) {
+    return json({ success: false, error: "unauthorized" }, 401);
+  }
+
+  let mismatch = 0;
+  for (let i = 0; i < expected.length; i++) {
+    mismatch |= expected.charCodeAt(i) ^ received.charCodeAt(i);
+  }
+  if (mismatch !== 0) {
+    return json({ success: false, error: "unauthorized" }, 401);
+  }
+
+  let payload;
+  try {
+    payload = await request.json();
+  } catch {
+    return json({ success: false, error: "invalid_json" }, 400);
+  }
+
+  const data = payload?.data && typeof payload.data === "object"
+    ? payload.data
+    : payload;
+  const event = typeof payload?.event === "string"
+    ? payload.event.slice(0, 80)
+    : "unknown";
+  const rawId = data?.messageId || data?.id || payload?.messageId || payload?.id;
+  const messageId = typeof rawId === "string" || typeof rawId === "number"
+    ? String(rawId).slice(0, 120)
+    : null;
+  const rawStatus = [
+    data?.status,
+    data?.messageStatus,
+    data?.ack,
+    data?.state,
+    payload?.status,
+    payload?.messageStatus,
+    payload?.ack,
+    payload?.state
+  ].find(value => typeof value === "string" || typeof value === "number");
+  const status = rawStatus === undefined ? null : String(rawStatus).slice(0, 40);
+
+  // Não registrar telefone, grupo, conteúdo, imagem ou segredo.
+  console.log("[WAPI_WEBHOOK]", JSON.stringify({
+    event,
+    messageId,
+    status,
+    fromMe: typeof data?.fromMe === "boolean" ? data.fromMe : null,
+    isGroup: typeof data?.isGroup === "boolean" ? data.isGroup : null
+  }));
+
+  return json({ success: true, received: true });
 }
 
 // ============================================================
