@@ -4078,9 +4078,61 @@ async function configurarWebhooksWapi(env) {
   return { configured: true, changed: true };
 }
 
-async function processarWebhookWapi() {
-  // Eventos informativos; não participam do fluxo de ofertas.
-  return json({ success: true, ignored: true });
+async function processarWebhookWapi(request, env, url) {
+  if (request.method !== "POST") {
+    return json({ success: false, error: "method_not_allowed" }, 405);
+  }
+
+  // O segredo existente é exposto como binding secreto do Worker.
+  // Assim, cada evento não precisa consultar nem gravar o KV.
+  const expected = env.WAPI_WEBHOOK_SECRET;
+  const received = url.searchParams.get("key") || "";
+
+  if (!expected || !received || expected.length !== received.length) {
+    return json({ success: false, error: "unauthorized" }, 401);
+  }
+
+  let mismatch = 0;
+  for (let i = 0; i < expected.length; i++) {
+    mismatch |= expected.charCodeAt(i) ^ received.charCodeAt(i);
+  }
+  if (mismatch !== 0) {
+    return json({ success: false, error: "unauthorized" }, 401);
+  }
+
+  let payload;
+  try {
+    payload = await request.json();
+  } catch {
+    return json({ success: false, error: "invalid_json" }, 400);
+  }
+
+  const event = typeof payload?.event === "string"
+    ? payload.event.slice(0, 80)
+    : "unknown";
+  const messageId = typeof payload?.messageId === "string"
+    ? payload.messageId.slice(0, 120)
+    : "";
+  const statusValue = [
+    payload?.status,
+    payload?.messageStatus,
+    payload?.ack,
+    payload?.state
+  ].find(value => typeof value === "string" && value.length > 0);
+  const status = statusValue ? statusValue.slice(0, 40) : "";
+  const moment = Number.isFinite(Number(payload?.moment))
+    ? Number(payload.moment)
+    : null;
+
+  // Não registrar telefone, grupo, conteúdo da mensagem nem segredo.
+  console.log("[WAPI_WEBHOOK]", JSON.stringify({
+    event,
+    messageId: messageId || null,
+    status: status || null,
+    moment
+  }));
+
+  return json({ success: true, received: true });
 }
 
 // ============================================================
