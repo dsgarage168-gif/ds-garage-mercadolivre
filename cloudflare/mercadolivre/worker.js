@@ -1438,7 +1438,7 @@ async function fetchComRetry(url, options = {}, maxAttempts = 3) {
   let response;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     response = await fetch(url, options);
-    const retryable = response.status === 429 || [500, 502, 503, 504].includes(response.status);
+    const retryable = [500, 502, 503, 504].includes(response.status); // 429: não repetir; respeitar o limite informado pela API.
     if (!retryable || attempt === maxAttempts) return response;
     const retryAfter = Number(response.headers.get('Retry-After'));
     const delay = Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter * 1000, 10000) : 500 * (2 ** (attempt - 1)) + Math.floor(Math.random() * 250);
@@ -2730,6 +2730,10 @@ originUrl:
 
         } catch (erro) {
 
+          if (/HTTP 429|Too Many Requests/i.test(erro?.message || String(erro))) {
+            throw erro; // Interrompe a execução: não consulta as demais categorias após rate limit.
+          }
+
           erroLimitado(
             diagnostico,
             {
@@ -2751,6 +2755,10 @@ originUrl:
       }
 
     } catch (erro) {
+
+      if (/HTTP 429|Too Many Requests/i.test(erro?.message || String(erro))) {
+        throw erro; // Não continua consultando outras categorias após rate limit.
+      }
 
       erroLimitado(
         diagnostico,
@@ -3666,11 +3674,16 @@ etapa = "gerar link de afiliado";
     console.error("STACK ML", erro.stack);
   }
 
-  await enviarAlertaErro(
-    env,
-    etapa,
-    erro
-  );
+  const rateLimited = /HTTP 429|Too Many Requests/i.test(erro?.message || String(erro));
+  if (rateLimited) {
+    console.warn('Rate limit HTTP 429: alerta WhatsApp suprimido; nova tentativa ficará para o próximo cron.');
+  } else {
+    await enviarAlertaErro(
+      env,
+      etapa,
+      erro
+    );
+  }
 
   throw erro;
 }
